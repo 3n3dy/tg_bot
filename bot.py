@@ -1,5 +1,7 @@
+import os
 import logging
 import traceback
+import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -22,14 +24,26 @@ logger = logging.getLogger(__name__)
 # --- Стани ---
 CHOOSING_PRODUCT, ASK_EMAIL, PAYMENT_DECISION, NEXT_STEP = range(4)
 
+# --- Змінні середовища ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GOOGLE_CREDS = os.getenv("GOOGLE_CREDS")
+MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")  # Наприклад: "123456789"
+
 # --- Google Sheets ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    "smooth-calling-470117-h2-5475aabd3ec1.json", scope
-)
-client = gspread.authorize(creds)
-sheet = client.open("Name2").sheet1
+creds_dict = json.loads(GOOGLE_CREDS)
+import json
+creds_dict = json.loads(os.getenv("GOOGLE_CREDS"))
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 
+client = gspread.authorize(creds)
+
+# --- Таблиця ---
+try:
+    sheet = client.open("BusinessBotData").sheet1
+except gspread.SpreadsheetNotFound:
+    sheet = client.create("BusinessBotData").sheet1
+    sheet.append_row(["Товар", "Email", "Оплата"])
 
 # --- Хендлери ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -42,25 +56,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Виберіть товар:", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHOOSING_PRODUCT
 
-
 async def choose_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["product"] = query.data
-
     await query.edit_message_text(f"Ви обрали {query.data}. Введіть ваш email:")
     return ASK_EMAIL
-
 
 async def save_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = update.message.text
     product = context.user_data.get("product")
-
-    # Знайти наступний вільний рядок
     next_row = len(sheet.get_all_values()) + 1
     sheet.update(f"A{next_row}:B{next_row}", [[product, email]])
-
     context.user_data["row"] = next_row
+    context.user_data["email"] = email
 
     keyboard = [
         [InlineKeyboardButton("✅ Оплатив", callback_data="paid")],
@@ -69,15 +78,21 @@ async def save_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ви бажаєте оплатити зараз?", reply_markup=InlineKeyboardMarkup(keyboard))
     return PAYMENT_DECISION
 
-
 async def payment_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     row = context.user_data["row"]
     decision = "Оплачено" if query.data == "paid" else "Відкладено"
-
     sheet.update(f"C{row}", [[decision]])
+
+    # --- Повідомлення менеджеру ---
+    product = context.user_data.get("product")
+    email = context.user_data.get("email")
+    message = f"🆕 Нове замовлення:\n📦 {product}\n📧 {email}\n💳 Статус: {decision}"
+    try:
+        await context.bot.send_message(chat_id=int(MANAGER_CHAT_ID), text=message)
+    except Exception as e:
+        logger.warning(f"Не вдалося надіслати повідомлення менеджеру: {e}")
 
     keyboard = [
         [InlineKeyboardButton("🛍 До товарів", callback_data="restart_products")],
@@ -86,25 +101,20 @@ async def payment_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("Дякуємо! Що далі?", reply_markup=InlineKeyboardMarkup(keyboard))
     return NEXT_STEP
 
-
 async def next_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     if query.data == "restart_products":
         return await start(query, context)
     else:
         await query.edit_message_text("Вітаю! Ви знову на головній. Введіть /start")
         return ConversationHandler.END
 
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception: %s", traceback.format_exc())
 
-
 def main():
-    app = ApplicationBuilder().token("5387944433:AAH5rqjcxdHOJ3itGKUg8-BZu_jrfyybUF0").build()
-
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -115,12 +125,9 @@ def main():
         },
         fallbacks=[CommandHandler("start", start)],
     )
-
     app.add_handler(conv_handler)
     app.add_error_handler(error_handler)
-
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
