@@ -39,11 +39,11 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 # --- Таблиця ---
-try:
-    sheet = client.open("BusinessBotData").sheet1
-except gspread.SpreadsheetNotFound:
-    sheet = client.create("BusinessBotData").sheet1
-    sheet.append_row(["Товар", "Email", "Оплата"])
+
+SHEET_ID = os.getenv("SHEET_ID")
+sheet = client.open_by_key(SHEET_ID).sheet1
+
+
 
 # --- Хендлери ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
